@@ -3,6 +3,26 @@ const express = require('express');
 const app = express();
 app.use(express.json());
 
+// DICCIONARIO DE TRADUCCIÓN (Solo planes CON XXX - 3 Dispositivos)
+const mapeoPlanes = {
+    '1mes': '2',
+    '+1': '2',
+    '1': '2',
+    '3meses': '6',
+    '+3': '6',
+    '3': '6',
+    '4meses': '32',   
+    '+4': '32',
+    '6meses': '10',
+    '+6': '10',
+    '6': '10',
+    '1ano': '14',
+    '12meses': '14',
+    '+12': '14',
+    '12': '14',
+    
+};
+
 // FUNCIÓN AUXILIAR PARA INICIAR SESIÓN EN EL PANEL
 async function loginToPanel(page) {
     await page.goto('http://redworld.pro:2052/login.php');
@@ -11,10 +31,13 @@ async function loginToPanel(page) {
     await page.click('button[type="submit"]');
 }
 
-// 1. RUTA PARA CREAR USUARIO (Y EXTRAER SU CLAVE)
+// 1. RUTA PARA CREAR USUARIO
 app.post('/create-user', async (req, res) => {
     const { username, packageId } = req.body;
     
+    // Traducir el paquete ingresado al ID real del panel
+    const realPackageId = mapeoPlanes[packageId] || packageId;
+
     const browser = await chromium.launch({ 
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
@@ -25,32 +48,27 @@ app.post('/create-user', async (req, res) => {
     try {
         await loginToPanel(page);
 
-        // Ir a la sección de creación
         await page.goto('http://redworld.pro:2052/user_reseller.php');
         await page.fill('#username', username);
-        await page.selectOption('#package', packageId);
+        
+        // Usar la ID real traducida
+        await page.selectOption('#package', realPackageId);
 
-        // Avanzar a Review y esperar el cálculo interno del JS del panel
         await page.click('a[href="#review-purchase"]');
         await page.waitForTimeout(3000); 
 
-        // Clic en el botón real de Purchase
         await page.click('.purchase');
         
-        // CORRECCIÓN CRÍTICA: Esperamos máximo 15 segundos a que la URL cambie a "successedit"
-        // sin importar si quedan elementos secundarios cargando en la red.
         try {
-            await page.waitForURL('**/user_reseller.php?successedit*', { timeout: 15000, waitUntil: 'load' });
+            await page.waitForURL('**/user_reseller.php?successedit*', { timeout: 20000, waitUntil: 'load' });
         } catch (urlError) {
-            console.log("Aviso: Espera de redirección al límite, verificando URL actual...");
+            console.log("Aviso: Espera de redirección al límite...");
         }
         
         const currentUrl = page.url();
 
         if (currentUrl.includes('successedit')) {
             const userId = currentUrl.split('id=')[1];
-            
-            // Vamos directo a la edición para rescatar las credenciales creadas
             await page.goto(`http://redworld.pro:2052/user_reseller.php?action=edit&id=${userId}`);
             
             const finalUsername = await page.inputValue('input[name="username"]');
@@ -62,7 +80,12 @@ app.post('/create-user', async (req, res) => {
                 data: { id: userId, username: finalUsername, password: finalPassword }
             });
         } else {
-            res.status(400).json({ status: 'error', message: 'El panel no redirigió a la pantalla de éxito.' });
+            const errorText = await page.locator('.alert, .alert-danger, .error').innerText().catch(() => null);
+            res.status(400).json({ 
+                status: 'error', 
+                message: 'El panel no redirigió a éxito.',
+                details: errorText || "Usuario duplicado o falta de créditos."
+            });
         }
     } catch (error) {
         res.status(500).json({ status: 'error', message: error.message });
@@ -71,9 +94,12 @@ app.post('/create-user', async (req, res) => {
     }
 });
 
-// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO EXISTENTE
+// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO
 app.post('/extend-user', async (req, res) => {
     const { username, packageId } = req.body;
+    
+    // Traducir el paquete ingresado al ID real del panel
+    const realPackageId = mapeoPlanes[packageId] || packageId;
 
     const browser = await chromium.launch({ 
         headless: true,
@@ -85,54 +111,41 @@ app.post('/extend-user', async (req, res) => {
     try {
         await loginToPanel(page);
 
-        // Navegar al listado de usuarios
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
-        // 1. LOCALIZAR EL BUSCADOR POR SU ID REAL
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
-        // Hacer clic, limpiar el valor precargado ("Search Users...") y escribir el usuario real
         await searchInput.click();
         await page.evaluate(() => {
             document.querySelector('#user_search').value = '';
         });
         await searchInput.fill(username);
-        
-        // Esperar a que la tabla filtre los resultados
         await page.waitForTimeout(3000); 
 
-        // 2. BUSCAR EL ENLACE DEL USUARIO EN LA TABLA
-        // Buscamos el link que contiene el nombre exacto del cliente (ej: "elmenabot")
         const userLink = page.locator(`a[href*="id="]:has-text("${username}")`).first();
-        
         if (await userLink.count() === 0) {
-            return res.status(404).json({ status: 'error', message: `El usuario '${username}' no fue encontrado tras filtrar.` });
+            return res.status(404).json({ status: 'error', message: `El usuario '${username}' no fue encontrado.` });
         }
 
-        // Extraemos el ID único del usuario desde su enlace de la tabla
         const href = await userLink.getAttribute('href'); 
         const userId = href.split('id=')[1];
 
-        // 3. IR DIRECTO A LA URL DE EXTENSIÓN EVITANDO SELECCIONAR BOTONES MÓVILES O DESPLEGABLES
         await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`);
         await page.waitForLoadState('networkidle');
         
-        // Seleccionar el paquete enviado desde Telegram (ej: "2")
-        await page.selectOption('#package', packageId);
+        // Usar la ID real traducida
+        await page.selectOption('#package', realPackageId);
         
-        // Flujo visual para activar los créditos
         await page.click('a[href="#review-purchase"]');
         await page.waitForTimeout(3000); 
 
-        // Clic final en realizar compra de renovación
         await page.click('.purchase');
         
-        // Esperar la redirección de éxito
         try {
             await page.waitForURL('**/user_reseller.php?successedit*', { timeout: 15000, waitUntil: 'load' });
         } catch (urlError) {
-            console.log("Aviso: Espera de redirección al límite tras renovar, verificando...");
+            console.log("Aviso: Espera de redirección al límite tras renovar...");
         }
 
         res.json({ 
@@ -147,5 +160,4 @@ app.post('/extend-user', async (req, res) => {
     }
 });
 
-// ESCUCHAR EN EL PUERTO 3000 EN TODAS LAS INTERFACES DE RED PARA DOCKER
 app.listen(3000, '0.0.0.0', () => console.log('API de Playwright lista en el puerto 3000'));
