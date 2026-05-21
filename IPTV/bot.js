@@ -8,8 +8,9 @@ const mapeoPlanes = {
     '1mes': '2',
     '+1': '2',
     '1': '2',
-    '2meses': '31',  
+    '2meses': '31',
     '+2': '31',
+    '2': '31',
     '3meses': '6',
     '+3': '6',
     '3': '6',
@@ -33,7 +34,7 @@ async function loginToPanel(page) {
     await page.click('button[type="submit"]');
 }
 
-// 1. RUTA PARA CREAR USUARIO
+// 1. RUTA PARA CREAR USUARIO (AHORA ENTREGA EXPIRACIÓN Y DÍAS)
 app.post('/create-user', async (req, res) => {
     const { username, packageId } = req.body;
     const realPackageId = mapeoPlanes[packageId] || packageId;
@@ -66,15 +67,39 @@ app.post('/create-user', async (req, res) => {
 
         if (currentUrl.includes('successedit')) {
             const userId = currentUrl.split('id=')[1];
+            
+            // Ir al formulario de edición para sacar las credenciales y las fechas
             await page.goto(`http://redworld.pro:2052/user_reseller.php?action=edit&id=${userId}`);
             
             const finalUsername = await page.inputValue('input[name="username"]');
             const finalPassword = await page.inputValue('input[name="password"]');
+            
+            // Regresar a la tabla de usuarios para buscar las fechas de este usuario creado
+            await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
+            await page.fill('#user_search', finalUsername);
+            await page.waitForTimeout(2000);
+
+            // Extraer fecha y días desde las columnas de la tabla filtrada
+            const fechas = await page.evaluate((uname) => {
+                const fila = Array.from(document.querySelectorAll('#datatable-users tbody tr')).find(tr => tr.innerText.includes(uname));
+                if (!fila) return { expiration: 'No encontrada', daysLeft: 'No encontrado' };
+                const columnas = fila.querySelectorAll('td');
+                return {
+                    expiration: columnas[6]?.innerText.trim() || 'N/A',
+                    daysLeft: columnas[7]?.innerText.trim() || 'N/A'
+                };
+            }, finalUsername);
 
             res.json({ 
                 status: 'success', 
                 message: 'Usuario creado exitosamente',
-                data: { id: userId, username: finalUsername, password: finalPassword }
+                data: { 
+                    id: userId, 
+                    username: finalUsername, 
+                    password: finalPassword,
+                    expiration: fechas.expiration,
+                    daysLeft: fechas.daysLeft
+                }
             });
         } else {
             const errorText = await page.locator('.alert, .alert-danger, .error').innerText().catch(() => null);
@@ -91,7 +116,7 @@ app.post('/create-user', async (req, res) => {
     }
 });
 
-// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO
+// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO (AHORA ENTREGA EXPIRACIÓN Y DÍAS)
 app.post('/extend-user', async (req, res) => {
     const { username, packageId } = req.body;
     const realPackageId = mapeoPlanes[packageId] || packageId;
@@ -141,9 +166,29 @@ app.post('/extend-user', async (req, res) => {
             console.log("Aviso: Espera de redirección al límite tras renovar...");
         }
 
+        // Volver a buscar el usuario en la tabla general para ver sus nuevas fechas actualizadas tras la renovación
+        await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
+        await page.fill('#user_search', username);
+        await page.waitForTimeout(2000);
+
+        const fechasActualizadas = await page.evaluate((uname) => {
+            const fila = Array.from(document.querySelectorAll('#datatable-users tbody tr')).find(tr => tr.innerText.includes(uname));
+            if (!fila) return { expiration: 'No encontrada', daysLeft: 'No encontrado' };
+            const columnas = fila.querySelectorAll('td');
+            return {
+                expiration: columnas[6]?.innerText.trim() || 'N/A',
+                daysLeft: columnas[7]?.innerText.trim() || 'N/A'
+            };
+        }, username);
+
         res.json({ 
             status: 'success', 
-            message: `¡Usuario ${username} renovado exitosamente con el paquete ${packageId}!` 
+            message: `¡Usuario ${username} renovado exitosamente con el paquete ${packageId}!`,
+            data: {
+                username: username,
+                expiration: fechasActualizadas.expiration,
+                daysLeft: fechasActualizadas.daysLeft
+            }
         });
 
     } catch (error) {
@@ -153,7 +198,7 @@ app.post('/extend-user', async (req, res) => {
     }
 });
 
-// 3. RUTA PARA OBTENER TODOS LOS CLIENTES USANDO PAGINACIÓN (PÁGINA POR PÁGINA)
+// 3. RUTA PARA OBTENER TODOS LOS CLIENTES USANDO PAGINACIÓN
 app.post('/vencimientos', async (req, res) => {
     const browser = await chromium.launch({ 
         headless: true,
@@ -170,10 +215,8 @@ app.post('/vencimientos', async (req, res) => {
         let tieneSiguiente = true;
 
         while (tieneSiguiente) {
-            // Esperar que la tabla cargue en la página actual
             await page.waitForSelector('#datatable-users tbody tr', { timeout: 10000 });
 
-            // Extraer las filas de la página actual
             const usuariosPagina = await page.evaluate(() => {
                 const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
                 return filas.map(fila => {
@@ -190,18 +233,14 @@ app.post('/vencimientos', async (req, res) => {
                 }).filter(u => u !== null);
             });
 
-            // Sumar los usuarios encontrados al saco global
             todosLosUsuarios = todosLosUsuarios.concat(usuariosPagina);
 
-            // Verificar si el botón "Siguiente" (#datatable-users_next) está deshabilitado
             const nextButton = page.locator('#datatable-users_next');
             const classAttribute = await nextButton.getAttribute('class').catch(() => '');
 
-            // Si la clase contiene 'disabled', significa que llegamos a la última página
             if (classAttribute.includes('disabled')) {
                 tieneSiguiente = false;
             } else {
-                // Hacer clic en Siguiente y esperar un momento a que cambien las filas
                 await nextButton.click();
                 await page.waitForTimeout(2000); 
             }
