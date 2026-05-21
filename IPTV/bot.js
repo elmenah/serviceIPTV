@@ -160,7 +160,7 @@ app.post('/extend-user', async (req, res) => {
     }
 });
 
-// 3. RUTA PARA OBTENER CLIENTES PRÓXIMOS A VENCER
+// 3. RUTA PARA OBTENER CLIENTES PRÓXIMOS A VENCER (VERSION BLINDADA)
 app.post('/vencimientos', async (req, res) => {
     const browser = await chromium.launch({ 
         headless: true,
@@ -175,37 +175,34 @@ app.post('/vencimientos', async (req, res) => {
         // Ir al listado de usuarios
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
-        // Esperar que la tabla cargue
-        await page.waitForSelector('table tbody tr');
+        // Esperar que la tabla específica de usuarios esté visible
+        await page.waitForSelector('#datatable-users tbody tr', { timeout: 15000 });
 
-        // Cambiar el combo "Show 10" al máximo posible (ej: 100 o 500 si lo permite el panel)
-        // Revisamos si existe el selector de cantidad de registros
-        const lengthSelect = page.locator('select[name*="length"], select[name*="entries"]').first();
-        if (await lengthSelect.count() > 0) {
-            // Seleccionamos la opción con el valor más alto disponible en el combo (suele ser "100" o "all")
-            await lengthSelect.selectOption({ index: await lengthSelect.locator('option').count() - 1 });
-            await page.waitForTimeout(2000); // Esperar que recargue la tabla expandida
-        }
-
-        // Raspar los datos de todas las filas de la tabla
+        // Raspar los datos de las filas visibles directamente
         const usuarios = await page.evaluate(() => {
-            const filas = Array.from(document.querySelectorAll('table tbody tr'));
+            // Apuntamos directo al ID de la tabla que nos dio tu log: "datatable-users"
+            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            
             return filas.map(fila => {
                 const columnas = fila.querySelectorAll('td');
-                if (columnas.length < 6) return null; // Saltar filas vacías o de carga
+                if (columnas.length < 8) return null; // Saltar filas inválidas o de carga
 
                 return {
                     id: columnas[0]?.innerText.trim(),
                     username: columnas[1]?.innerText.trim(),
                     reseller: columnas[3]?.innerText.trim(),
                     status: columnas[4]?.innerText.trim(),
-                    expiration: columnas[6]?.innerText.trim(), // Ajustar índice según la columna EXPIRATION
-                    daysLeft: columnas[7]?.innerText.trim()    // Columna DAYS
+                    expiration: columnas[6]?.innerText.trim(), // Columna EXPIRATION
+                    daysLeft: columnas[7]?.innerText.trim()    // Columna DAYS (ej: "31 Days")
                 };
             }).filter(u => u !== null);
         });
 
-        res.json({ status: 'success', total: usuarios.length, data: usuarios });
+        res.json({ 
+            status: 'success', 
+            total_pagina: usuarios.length, 
+            data: usuarios 
+        });
 
     } catch (error) {
         res.status(500).json({ status: 'error', message: error.message });
