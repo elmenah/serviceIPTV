@@ -85,47 +85,61 @@ app.post('/extend-user', async (req, res) => {
     try {
         await loginToPanel(page);
 
-        // Ir al listado de usuarios administrables
-        await page.goto('http://redworld.pro:2052/users.php');
+        // Navegar al listado de usuarios
+        await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
-        // Buscar al cliente en la barra de búsqueda integrada de la tabla
-        await page.fill('input[type="search"]', username);
-        await page.waitForTimeout(2000); // Esperar que filtre las filas
+        // 1. LOCALIZAR EL BUSCADOR POR SU ID REAL
+        const searchInput = page.locator('#user_search');
+        await searchInput.waitFor({ state: 'visible', timeout: 10000 });
+        
+        // Hacer clic, limpiar el valor precargado ("Search Users...") y escribir el usuario real
+        await searchInput.click();
+        await page.evaluate(() => {
+            document.querySelector('#user_search').value = '';
+        });
+        await searchInput.fill(username);
+        
+        // Esperar a que la tabla filtre los resultados
+        await page.waitForTimeout(3000); 
 
-        // Ubicar el enlace que lleva al usuario específico
-        const editLink = await page.locator(`a:has-text("${username}")`).first();
-        if (await editLink.count() === 0) {
-            return res.status(404).json({ status: 'error', message: `Usuario '${username}' no encontrado en el panel para renovar.` });
-        }
+        // 2. BUSCAR EL ENLACE DEL USUARIO EN LA TABLA
+        // Buscamos el link que contiene el nombre exacto del cliente (ej: "elmenabot")
+        const userLink = page.locator(`a[href*="id="]:has-text("${username}")`).first();
         
-        // Extraer el link de edición del atributo href
-        const href = await editLink.getAttribute('href'); 
+        if (await userLink.count() === 0) {
+            return res.status(404).json({ status: 'error', message: `El usuario '${username}' no fue encontrado tras filtrar.` });
+        }
+
+        // Extraemos el ID único del usuario desde su enlace de la tabla
+        const href = await userLink.getAttribute('href'); 
         const userId = href.split('id=')[1];
 
-        // Navegar directo a la sección de edición y extensión usando su ID
-        await page.goto(`http://redworld.pro:2052/user_reseller.php?action=edit&id=${userId}`);
+        // 3. IR DIRECTO A LA URL DE EXTENSIÓN EVITANDO SELECCIONAR BOTONES MÓVILES O DESPLEGABLES
+        await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`);
+        await page.waitForLoadState('networkidle');
         
-        // Seleccionar el paquete de renovación correspondiente
+        // Seleccionar el paquete enviado desde Telegram (ej: "2")
         await page.selectOption('#package', packageId);
         
-        // Simular el flujo visual para calcular los créditos requeridos
+        // Flujo visual para activar los créditos
         await page.click('a[href="#review-purchase"]');
         await page.waitForTimeout(3000); 
 
-        // Clic final en renovar/comprar
+        // Clic final en realizar compra de renovación
         await page.click('.purchase');
         
-        // Espera optimizada para la redirección de éxito tras renovar
+        // Esperar la redirección de éxito
         try {
             await page.waitForURL('**/user_reseller.php?successedit*', { timeout: 15000, waitUntil: 'load' });
         } catch (urlError) {
-            console.log("Aviso: Espera de redirección de renovación al límite...");
+            console.log("Aviso: Espera de redirección al límite tras renovar, verificando...");
         }
 
         res.json({ 
             status: 'success', 
-            message: `Usuario ${username} renovado con éxito con el paquete ${packageId}.` 
+            message: `¡Usuario ${username} renovado exitosamente con el paquete ${packageId}!` 
         });
+
     } catch (error) {
         res.status(500).json({ status: 'error', message: error.message });
     } finally {
