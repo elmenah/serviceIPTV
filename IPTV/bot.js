@@ -160,4 +160,58 @@ app.post('/extend-user', async (req, res) => {
     }
 });
 
+// 3. RUTA PARA OBTENER CLIENTES PRÓXIMOS A VENCER
+app.post('/vencimientos', async (req, res) => {
+    const browser = await chromium.launch({ 
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+    });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+
+    try {
+        await loginToPanel(page);
+
+        // Ir al listado de usuarios
+        await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
+        
+        // Esperar que la tabla cargue
+        await page.waitForSelector('table tbody tr');
+
+        // Cambiar el combo "Show 10" al máximo posible (ej: 100 o 500 si lo permite el panel)
+        // Revisamos si existe el selector de cantidad de registros
+        const lengthSelect = page.locator('select[name*="length"], select[name*="entries"]').first();
+        if (await lengthSelect.count() > 0) {
+            // Seleccionamos la opción con el valor más alto disponible en el combo (suele ser "100" o "all")
+            await lengthSelect.selectOption({ index: await lengthSelect.locator('option').count() - 1 });
+            await page.waitForTimeout(2000); // Esperar que recargue la tabla expandida
+        }
+
+        // Raspar los datos de todas las filas de la tabla
+        const usuarios = await page.evaluate(() => {
+            const filas = Array.from(document.querySelectorAll('table tbody tr'));
+            return filas.map(fila => {
+                const columnas = fila.querySelectorAll('td');
+                if (columnas.length < 6) return null; // Saltar filas vacías o de carga
+
+                return {
+                    id: columnas[0]?.innerText.trim(),
+                    username: columnas[1]?.innerText.trim(),
+                    reseller: columnas[3]?.innerText.trim(),
+                    status: columnas[4]?.innerText.trim(),
+                    expiration: columnas[6]?.innerText.trim(), // Ajustar índice según la columna EXPIRATION
+                    daysLeft: columnas[7]?.innerText.trim()    // Columna DAYS
+                };
+            }).filter(u => u !== null);
+        });
+
+        res.json({ status: 'success', total: usuarios.length, data: usuarios });
+
+    } catch (error) {
+        res.status(500).json({ status: 'error', message: error.message });
+    } finally {
+        await browser.close();
+    }
+});
+
 app.listen(3000, '0.0.0.0', () => console.log('API de Playwright lista en el puerto 3000'));
