@@ -3,7 +3,7 @@ const express = require('express');
 const app = express();
 app.use(express.json());
 
-// DICCIONARIO DE TRADUCCIÓN (Solo planes CON XXX - 3 Dispositivos)
+// DICCIONARIO DE TRADUCCIÓN (Planes CON XXX - 3 Dispositivos)
 const mapeoPlanes = {
     '1mes': '2',
     '+1': '2',
@@ -11,16 +11,16 @@ const mapeoPlanes = {
     '3meses': '6',
     '+3': '6',
     '3': '6',
-    '4meses': '32',   
+    '4meses': '32',
     '+4': '32',
+    '4': '32',
     '6meses': '10',
     '+6': '10',
     '6': '10',
     '1ano': '14',
     '12meses': '14',
     '+12': '14',
-    '12': '14',
-    
+    '12': '14'
 };
 
 // FUNCIÓN AUXILIAR PARA INICIAR SESIÓN EN EL PANEL
@@ -34,8 +34,6 @@ async function loginToPanel(page) {
 // 1. RUTA PARA CREAR USUARIO
 app.post('/create-user', async (req, res) => {
     const { username, packageId } = req.body;
-    
-    // Traducir el paquete ingresado al ID real del panel
     const realPackageId = mapeoPlanes[packageId] || packageId;
 
     const browser = await chromium.launch({ 
@@ -47,11 +45,8 @@ app.post('/create-user', async (req, res) => {
 
     try {
         await loginToPanel(page);
-
         await page.goto('http://redworld.pro:2052/user_reseller.php');
         await page.fill('#username', username);
-        
-        // Usar la ID real traducida
         await page.selectOption('#package', realPackageId);
 
         await page.click('a[href="#review-purchase"]');
@@ -97,8 +92,6 @@ app.post('/create-user', async (req, res) => {
 // 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO
 app.post('/extend-user', async (req, res) => {
     const { username, packageId } = req.body;
-    
-    // Traducir el paquete ingresado al ID real del panel
     const realPackageId = mapeoPlanes[packageId] || packageId;
 
     const browser = await chromium.launch({ 
@@ -110,7 +103,6 @@ app.post('/extend-user', async (req, res) => {
 
     try {
         await loginToPanel(page);
-
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
         const searchInput = page.locator('#user_search');
@@ -134,7 +126,6 @@ app.post('/extend-user', async (req, res) => {
         await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`);
         await page.waitForLoadState('networkidle');
         
-        // Usar la ID real traducida
         await page.selectOption('#package', realPackageId);
         
         await page.click('a[href="#review-purchase"]');
@@ -160,7 +151,7 @@ app.post('/extend-user', async (req, res) => {
     }
 });
 
-// 3. RUTA PARA OBTENER CLIENTES PRÓXIMOS A VENCER (VERSION BLINDADA)
+// 3. RUTA PARA OBTENER TODOS LOS CLIENTES USANDO PAGINACIÓN (PÁGINA POR PÁGINA)
 app.post('/vencimientos', async (req, res) => {
     const browser = await chromium.launch({ 
         headless: true,
@@ -171,37 +162,53 @@ app.post('/vencimientos', async (req, res) => {
 
     try {
         await loginToPanel(page);
-
-        // Ir al listado de usuarios
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
-        // Esperar que la tabla específica de usuarios esté visible
-        await page.waitForSelector('#datatable-users tbody tr', { timeout: 15000 });
+        let todosLosUsuarios = [];
+        let tieneSiguiente = true;
 
-        // Raspar los datos de las filas visibles directamente
-        const usuarios = await page.evaluate(() => {
-            // Apuntamos directo al ID de la tabla que nos dio tu log: "datatable-users"
-            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
-            
-            return filas.map(fila => {
-                const columnas = fila.querySelectorAll('td');
-                if (columnas.length < 8) return null; // Saltar filas inválidas o de carga
+        while (tieneSiguiente) {
+            // Esperar que la tabla cargue en la página actual
+            await page.waitForSelector('#datatable-users tbody tr', { timeout: 10000 });
 
-                return {
-                    id: columnas[0]?.innerText.trim(),
-                    username: columnas[1]?.innerText.trim(),
-                    reseller: columnas[3]?.innerText.trim(),
-                    status: columnas[4]?.innerText.trim(),
-                    expiration: columnas[6]?.innerText.trim(), // Columna EXPIRATION
-                    daysLeft: columnas[7]?.innerText.trim()    // Columna DAYS (ej: "31 Days")
-                };
-            }).filter(u => u !== null);
-        });
+            // Extraer las filas de la página actual
+            const usuariosPagina = await page.evaluate(() => {
+                const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+                return filas.map(fila => {
+                    const columnas = fila.querySelectorAll('td');
+                    if (columnas.length < 8) return null;
+                    return {
+                        id: columnas[0]?.innerText.trim(),
+                        username: columnas[1]?.innerText.trim(),
+                        reseller: columnas[3]?.innerText.trim(),
+                        status: columnas[4]?.innerText.trim(),
+                        expiration: columnas[6]?.innerText.trim(),
+                        daysLeft: columnas[7]?.innerText.trim()
+                    };
+                }).filter(u => u !== null);
+            });
+
+            // Sumar los usuarios encontrados al saco global
+            todosLosUsuarios = todosLosUsuarios.concat(usuariosPagina);
+
+            // Verificar si el botón "Siguiente" (#datatable-users_next) está deshabilitado
+            const nextButton = page.locator('#datatable-users_next');
+            const classAttribute = await nextButton.getAttribute('class').catch(() => '');
+
+            // Si la clase contiene 'disabled', significa que llegamos a la última página
+            if (classAttribute.includes('disabled')) {
+                tieneSiguiente = false;
+            } else {
+                // Hacer clic en Siguiente y esperar un momento a que cambien las filas
+                await nextButton.click();
+                await page.waitForTimeout(2000); 
+            }
+        }
 
         res.json({ 
             status: 'success', 
-            total_pagina: usuarios.length, 
-            data: usuarios 
+            total_extraidos: todosLosUsuarios.length, 
+            data: todosLosUsuarios 
         });
 
     } catch (error) {
