@@ -132,6 +132,15 @@ app.post('/extend-user', async (req, res) => {
         await loginToPanel(page);
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
+        // 1. ESPERAR QUE EL COMBO DE FILTRO DE DISTRIBUIDOR ESTÉ VISIBLE Y SELECCIONAR TU REVENDEdor
+        // Usamos el selector genérico del select de filtros del panel
+        const resellerSelect = page.locator('select[name*="reseller"], select[id*="reseller"]').first();
+        if (await resellerSelect.count() > 0) {
+            await resellerSelect.selectOption('Flashstorechile');
+            await page.waitForTimeout(2000); // Esperar que la tabla cargue solo tus clientes
+        }
+
+        // 2. AHORA SÍ, BUSCAR AL USUARIO DENTRO DE TUS CLIENTES FILTRADOS
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
@@ -140,33 +149,27 @@ app.post('/extend-user', async (req, res) => {
             document.querySelector('#user_search').value = '';
         });
         
-        // Escribir el usuario
         await searchInput.fill(username);
         
-        // CORRECCIÓN CLAVE: Esperamos activamente a que la tabla cambie y contenga el texto del usuario
-        // Esto evita que lea la tabla vieja o vacía mientras el panel procesa el filtro
+        // Espera inteligente a que la fila aparezca
         try {
             await page.waitForSelector(`#datatable-users tbody tr:has-text("${username}")`, { timeout: 8000 });
         } catch (e) {
-            console.log("Aviso: Espera de filtro por selector falló, usando tiempo alternativo...");
-            await page.waitForTimeout(4000); // Espera de respaldo por si el panel es lento
+            await page.waitForTimeout(4000); 
         }
 
-        // Buscar el enlace exacto del usuario filtrado en la tabla
         const userLink = page.locator(`#datatable-users tbody tr:has-text("${username}")`).locator('a[href*="id="]').first();
 
-        // Verificación final de seguridad
         if (await userLink.count() === 0) {
             return res.status(404).json({ 
                 status: 'error', 
-                message: `El usuario '${username}' no fue encontrado en la tabla tras filtrar.` 
+                message: `El usuario '${username}' no fue encontrado tras aplicar filtros.` 
             });
         }
 
         const href = await userLink.getAttribute('href'); 
         const userId = href.split('id=')[1];
 
-        // Ir a la página de extensión con la ID encontrada
         await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`);
         await page.waitForLoadState('networkidle');
         
