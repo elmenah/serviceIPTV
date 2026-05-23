@@ -121,7 +121,7 @@ app.post('/create-user', async (req, res) => {
     }
 });
 
-// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO (CORREGIDA CON EXTRACCIÓN ESTRICTA NATIVA)
+// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO
 app.post('/extend-user', async (req, res) => {
     const { username, packageId } = req.body;
     const realPackageId = mapeoPlanes[packageId] || packageId;
@@ -135,67 +135,56 @@ app.post('/extend-user', async (req, res) => {
 
     try {
         await loginToPanel(page);
+        
+        // Entramos directo a la página de usuarios
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
-        // Forzar filtro de distribuidor para que aparezca tu cliente sí o sí
-        const resellerSelect = page.locator('select[name*="reseller"], select[id*="reseller"]').first();
-        if (await resellerSelect.count() > 0) {
-            await resellerSelect.selectOption('Flashstorechile');
-            await page.waitForTimeout(2000); 
-        }
-
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
         await searchInput.click();
         await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
+        
+        // Escribimos el usuario que queremos buscar
         await searchInput.fill(username);
-        await page.waitForTimeout(3000); // Esperar que la tabla filtre en pantalla
+        await page.waitForTimeout(3000); // Esperamos 3 segundos fijos a que el panel reaccione
 
-        // EXTRACCIÓN CON LOGS DE DIAGNÓSTICO
-        const userMatch = await page.evaluate((uname) => {
+        // Extraemos el ID evaluando las filas directamente
+        const userId = await page.evaluate((uname) => {
             const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
-            
-            // Esto se imprimirá en los logs de Easypanel para ver qué pilló el bot
-            console.log("=== INICIO DE LECTURA DE TABLA ===");
-            console.log("Buscando de forma exacta a:", uname);
-            console.log("Total de filas encontradas en pantalla:", filas.length);
-
             for (const fila of filas) {
                 const columnas = fila.querySelectorAll('td');
                 if (columnas.length < 2) continue;
                 
-                const textoUsuario = columnas[1]?.innerText.trim();
-                console.log(`Fila analizada -> Usuario en panel: "${textoUsuario}"`);
+                // Limpiamos los textos para comparar de forma segura
+                const textoUsuario = columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase();
+                const nombreBuscado = uname.replace(/\s+/g, '').toLowerCase();
                 
-                if (textoUsuario && textoUsuario.toLowerCase() === uname.toLowerCase()) {
+                if (textoUsuario === nombreBuscado) {
                     const link = fila.querySelector('a[href*="id="]');
-                    return {
-                        href: link ? link.getAttribute('href') : null,
-                        usernameReal: textoUsuario
-                    };
+                    if (link) {
+                        const href = link.getAttribute('href');
+                        return href.split('id=')[1];
+                    }
                 }
             }
-            console.log("=== FIN DE LECTURA: NO HUBO COINCIDENCIA ===");
             return null;
         }, username);
 
-        if (!userMatch || !userMatch.href) {
+        if (!userId) {
             return res.status(404).json({ 
                 status: 'error', 
-                message: `El usuario '${username}' no fue encontrado de forma exacta en la tabla.` 
+                message: `El usuario '${username}' no fue encontrado en la tabla.` 
             });
         }
 
-        const userId = userMatch.href.split('id=')[1];
-
-        // Ejecutar extensión
+        // Si encontró el ID, procedemos a extender
         await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`);
         await page.waitForLoadState('networkidle');
         await page.selectOption('#package', realPackageId);
         
         await page.click('a[href="#review-purchase"]');
-        await page.waitForTimeout(3000); 
+        await page.waitForTimeout(2000); 
 
         await page.click('.purchase');
         
@@ -207,10 +196,6 @@ app.post('/extend-user', async (req, res) => {
 
         // Rescatar las nuevas fechas de la tabla tras renovar
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
-        if (await resellerSelect.count() > 0) {
-            await resellerSelect.selectOption('Flashstorechile');
-            await page.waitForTimeout(1500);
-        }
         await page.fill('#user_search', username);
         await page.waitForTimeout(2000);
 
