@@ -116,7 +116,7 @@ app.post('/create-user', async (req, res) => {
     }
 });
 
-// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO (CON CAPTURA DE PANTALLA EN ERROR)
+// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO (AHORA ENTREGA EXPIRACIÓN Y DÍAS)
 app.post('/extend-user', async (req, res) => {
     const { username, packageId } = req.body;
     const realPackageId = mapeoPlanes[packageId] || packageId;
@@ -136,68 +136,63 @@ app.post('/extend-user', async (req, res) => {
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
         await searchInput.click();
-        await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
+        await page.evaluate(() => {
+            document.querySelector('#user_search').value = '';
+        });
         await searchInput.fill(username);
-        await page.waitForTimeout(3000); // Esperar que el panel reaccione
+        await page.waitForTimeout(3000); 
 
-        // Intentar sacar el ID
-        const userId = await page.evaluate((uname) => {
-            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
-            for (const fila of filas) {
-                const columnas = fila.querySelectorAll('td');
-                if (columnas.length < 2) continue;
-                
-                const textoUsuario = columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase();
-                const nombreBuscado = uname.replace(/\s+/g, '').toLowerCase();
-                
-                if (textoUsuario === nombreBuscado) {
-                    const link = fila.querySelector('a[href*="id="]');
-                    if (link) {
-                        const href = link.getAttribute('href');
-                        return href.split('id=')[1];
-                    }
-                }
-            }
-            return null;
-        }, username);
-
-        // SI NO ENCUENTRA EL USUARIO, DISPARAMOS EL ERROR PARA QUE TOME LA FOTO
-        if (!userId) {
-            throw new Error(`El usuario '${username}' no fue encontrado en la tabla.`);
+        const userLink = page.locator(`a[href*="id="]:has-text("${username}")`).first();
+        if (await userLink.count() === 0) {
+            return res.status(404).json({ status: 'error', message: `El usuario '${username}' no fue encontrado.` });
         }
 
-        // Proceder a la extensión si todo va bien
+        const href = await userLink.getAttribute('href'); 
+        const userId = href.split('id=')[1];
+
         await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`);
         await page.waitForLoadState('networkidle');
+        
         await page.selectOption('#package', realPackageId);
         
         await page.click('a[href="#review-purchase"]');
-        await page.waitForTimeout(2000); 
+        await page.waitForTimeout(3000); 
+
         await page.click('.purchase');
         
-        await page.waitForURL('**/user_reseller.php?successedit*', { timeout: 15000, waitUntil: 'load' });
-
-        res.json({ status: 'success', message: `Usuario ${username} renovado.` });
-
-    } catch (error) {
-        // 📸 ¡EL BOT SE CAYÓ! TOMAMOS CAPTURA DE PANTALLA INMEDIATAMENTE
-        console.log(`Error detectado: ${error.message}. Tomando captura de pantalla...`);
-        
-        let screenshotBuffer = null;
         try {
-            // Toma una foto completa de la pantalla del panel en ese milisegundo
-            screenshotBuffer = await page.screenshot({ fullPage: true });
-        } catch (snapError) {
-            console.log("No se pudo tomar la captura:", snapError.message);
+            await page.waitForURL('**/user_reseller.php?successedit*', { timeout: 15000, waitUntil: 'load' });
+        } catch (urlError) {
+            console.log("Aviso: Espera de redirección al límite tras renovar...");
         }
 
-        // Devolvemos el error a n8n, pero le adjuntamos la foto en Base64 si existe
-        res.status(404).json({ 
-            status: 'error', 
-            message: error.message,
-            screenshot: screenshotBuffer ? screenshotBuffer.toString('base64') : null
+        // Volver a buscar el usuario en la tabla general para ver sus nuevas fechas actualizadas tras la renovación
+        await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
+        await page.fill('#user_search', username);
+        await page.waitForTimeout(2000);
+
+        const fechasActualizadas = await page.evaluate((uname) => {
+            const fila = Array.from(document.querySelectorAll('#datatable-users tbody tr')).find(tr => tr.innerText.includes(uname));
+            if (!fila) return { expiration: 'No encontrada', daysLeft: 'No encontrado' };
+            const columnas = fila.querySelectorAll('td');
+            return {
+                expiration: columnas[6]?.innerText.trim() || 'N/A',
+                daysLeft: columnas[7]?.innerText.trim() || 'N/A'
+            };
+        }, username);
+
+        res.json({ 
+            status: 'success', 
+            message: `¡Usuario ${username} renovado exitosamente con el paquete ${packageId}!`,
+            data: {
+                username: username,
+                expiration: fechasActualizadas.expiration,
+                daysLeft: fechasActualizadas.daysLeft
+            }
         });
 
+    } catch (error) {
+        res.status(500).json({ status: 'error', message: error.message });
     } finally {
         await browser.close();
     }
