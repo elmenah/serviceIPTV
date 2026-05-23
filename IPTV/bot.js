@@ -178,6 +178,7 @@ app.post('/extend-user', async (req, res) => {
             }
             console.log("=== FIN DE LECTURA: NO HUBO COINCIDENCIA ===");
             return null;
+        }, username);
 
         if (!userMatch || !userMatch.href) {
             return res.status(404).json({ 
