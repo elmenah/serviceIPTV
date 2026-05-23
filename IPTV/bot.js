@@ -152,15 +152,22 @@ app.post('/extend-user', async (req, res) => {
         await searchInput.fill(username);
         await page.waitForTimeout(3000); // Esperar que la tabla filtre en pantalla
 
-        // EXTRACCIÓN EN JAVASCRIPT NATIVO: Evalúa celda por celda de forma exacta
+        // EXTRACCIÓN CON LOGS DE DIAGNÓSTICO
         const userMatch = await page.evaluate((uname) => {
             const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            
+            // Esto se imprimirá en los logs de Easypanel para ver qué pilló el bot
+            console.log("=== INICIO DE LECTURA DE TABLA ===");
+            console.log("Buscando de forma exacta a:", uname);
+            console.log("Total de filas encontradas en pantalla:", filas.length);
+
             for (const fila of filas) {
                 const columnas = fila.querySelectorAll('td');
                 if (columnas.length < 2) continue;
                 
                 const textoUsuario = columnas[1]?.innerText.trim();
-                // Comparación idéntica absoluta (evita que iptvsebaa coincida con iptvsebastian)
+                console.log(`Fila analizada -> Usuario en panel: "${textoUsuario}"`);
+                
                 if (textoUsuario && textoUsuario.toLowerCase() === uname.toLowerCase()) {
                     const link = fila.querySelector('a[href*="id="]');
                     return {
@@ -169,8 +176,8 @@ app.post('/extend-user', async (req, res) => {
                     };
                 }
             }
+            console.log("=== FIN DE LECTURA: NO HUBO COINCIDENCIA ===");
             return null;
-        }, username);
 
         if (!userMatch || !userMatch.href) {
             return res.status(404).json({ 
