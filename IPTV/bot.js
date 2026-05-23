@@ -158,7 +158,11 @@ app.post('/extend-user', async (req, res) => {
             await page.waitForTimeout(4000); 
         }
 
-        const userLink = page.locator(`#datatable-users tbody tr:has-text("${username}")`).locator('a[href*="id="]').first();
+        // CAMBIO CLAVE: Buscamos la fila que tenga EXACTAMENTE el nombre de usuario, bloqueando los parecidos
+        const userLink = page.locator('#datatable-users tbody tr').filter({
+            has: page.locator('td:nth-child(2)'), // Apunta directo a la columna USERNAME
+            hasText: new RegExp(`^${username}$`, 'i') // El '^' y el '$' obligan a que el nombre sea idéntico
+        }).locator('a[href*="id="]').first();
 
         if (await userLink.count() === 0) {
             return res.status(404).json({ 
@@ -270,6 +274,71 @@ app.post('/vencimientos', async (req, res) => {
             status: 'success', 
             total_extraidos: todosLosUsuarios.length, 
             data: todosLosUsuarios 
+        });
+
+    } catch (error) {
+        res.status(500).json({ status: 'error', message: error.message });
+    } finally {
+        await browser.close();
+    }
+});
+
+// 4. RUTA PARA CONSULTAR SI UN USUARIO EXISTE Y SU ESTADO
+app.post('/check-user', async (req, res) => {
+    const { username } = req.body;
+
+    const browser = await chromium.launch({ 
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+    });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+
+    try {
+        await loginToPanel(page);
+        await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
+        
+        const searchInput = page.locator('#user_search');
+        await searchInput.waitFor({ state: 'visible', timeout: 10000 });
+        
+        // Limpiar búsqueda vieja e ingresar el usuario a consultar
+        await searchInput.click();
+        await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
+        await searchInput.fill(username);
+        await page.waitForTimeout(3000); // Esperar que filtre la tabla
+
+        // Buscar si el usuario aparece en la tabla
+        const usuarioEncontrado = await page.evaluate((uname) => {
+            const fila = Array.from(document.querySelectorAll('#datatable-users tbody tr'))
+                              .find(tr => tr.innerText.toLowerCase().includes(uname.toLowerCase()));
+            
+            if (!fila || fila.innerText.includes('No matching records found')) {
+                return null; // No existe
+            }
+
+            const columnas = fila.querySelectorAll('td');
+            return {
+                exists: true,
+                username: columnas[1]?.innerText.trim(),
+                reseller: columnas[3]?.innerText.trim(),
+                status: columnas[4]?.innerText.trim(),     // Ej: "Active" o "Disabled"
+                expiration: columnas[6]?.innerText.trim(), // Fecha de vencimiento
+                daysLeft: columnas[7]?.innerText.trim()    // Ej: "12 Days" o "-2 Days"
+            };
+        }, username);
+
+        if (!usuarioEncontrado) {
+            return res.json({ 
+                status: 'not_found', 
+                exists: false,
+                message: `El usuario '${username}' no existe en el panel.` 
+            });
+        }
+
+        res.json({
+            status: 'success',
+            exists: true,
+            data: usuarioEncontrado
         });
 
     } catch (error) {
