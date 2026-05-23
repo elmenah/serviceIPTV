@@ -139,17 +139,34 @@ app.post('/extend-user', async (req, res) => {
         await page.evaluate(() => {
             document.querySelector('#user_search').value = '';
         });
+        
+        // Escribir el usuario
         await searchInput.fill(username);
-        await page.waitForTimeout(3000); 
+        
+        // CORRECCIÓN CLAVE: Esperamos activamente a que la tabla cambie y contenga el texto del usuario
+        // Esto evita que lea la tabla vieja o vacía mientras el panel procesa el filtro
+        try {
+            await page.waitForSelector(`#datatable-users tbody tr:has-text("${username}")`, { timeout: 8000 });
+        } catch (e) {
+            console.log("Aviso: Espera de filtro por selector falló, usando tiempo alternativo...");
+            await page.waitForTimeout(4000); // Espera de respaldo por si el panel es lento
+        }
 
-        const userLink = page.locator(`a[href*="id="]:has-text("${username}")`).first();
+        // Buscar el enlace exacto del usuario filtrado en la tabla
+        const userLink = page.locator(`#datatable-users tbody tr:has-text("${username}")`).locator('a[href*="id="]').first();
+
+        // Verificación final de seguridad
         if (await userLink.count() === 0) {
-            return res.status(404).json({ status: 'error', message: `El usuario '${username}' no fue encontrado.` });
+            return res.status(404).json({ 
+                status: 'error', 
+                message: `El usuario '${username}' no fue encontrado en la tabla tras filtrar.` 
+            });
         }
 
         const href = await userLink.getAttribute('href'); 
         const userId = href.split('id=')[1];
 
+        // Ir a la página de extensión con la ID encontrada
         await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`);
         await page.waitForLoadState('networkidle');
         
