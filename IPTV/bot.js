@@ -34,7 +34,7 @@ async function loginToPanel(page) {
     await page.click('button[type="submit"]');
 }
 
-// 1. RUTA PARA CREAR USUARIO (AHORA ENTREGA EXPIRACIÓN Y DÍAS)
+// 1. RUTA PARA CREAR USUARIO
 app.post('/create-user', async (req, res) => {
     const { username, packageId } = req.body;
     const realPackageId = mapeoPlanes[packageId] || packageId;
@@ -68,18 +68,23 @@ app.post('/create-user', async (req, res) => {
         if (currentUrl.includes('successedit')) {
             const userId = currentUrl.split('id=')[1];
             
-            // Ir al formulario de edición para sacar las credenciales y las fechas
             await page.goto(`http://redworld.pro:2052/user_reseller.php?action=edit&id=${userId}`);
             
             const finalUsername = await page.inputValue('input[name="username"]');
             const finalPassword = await page.inputValue('input[name="password"]');
             
-            // Regresar a la tabla de usuarios para buscar las fechas de este usuario creado
             await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
+            
+            // Forzar filtro de distribuidor para acortar la búsqueda
+            const resellerSelect = page.locator('select[name*="reseller"], select[id*="reseller"]').first();
+            if (await resellerSelect.count() > 0) {
+                await resellerSelect.selectOption('Flashstorechile');
+                await page.waitForTimeout(1500);
+            }
+
             await page.fill('#user_search', finalUsername);
             await page.waitForTimeout(2000);
 
-            // Extraer fecha y días desde las columnas de la tabla filtrada
             const fechas = await page.evaluate((uname) => {
                 const fila = Array.from(document.querySelectorAll('#datatable-users tbody tr')).find(tr => tr.innerText.includes(uname));
                 if (!fila) return { expiration: 'No encontrada', daysLeft: 'No encontrado' };
@@ -116,7 +121,7 @@ app.post('/create-user', async (req, res) => {
     }
 });
 
-// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO (AHORA ENTREGA EXPIRACIÓN Y DÍAS)
+// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO (CORREGIDA CON EXTRACCIÓN ESTRICTA NATIVA)
 app.post('/extend-user', async (req, res) => {
     const { username, packageId } = req.body;
     const realPackageId = mapeoPlanes[packageId] || packageId;
@@ -132,51 +137,53 @@ app.post('/extend-user', async (req, res) => {
         await loginToPanel(page);
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
-        // 1. ESPERAR QUE EL COMBO DE FILTRO DE DISTRIBUIDOR ESTÉ VISIBLE Y SELECCIONAR TU REVENDEdor
-        // Usamos el selector genérico del select de filtros del panel
+        // Forzar filtro de distribuidor para que aparezca tu cliente sí o sí
         const resellerSelect = page.locator('select[name*="reseller"], select[id*="reseller"]').first();
         if (await resellerSelect.count() > 0) {
             await resellerSelect.selectOption('Flashstorechile');
-            await page.waitForTimeout(2000); // Esperar que la tabla cargue solo tus clientes
+            await page.waitForTimeout(2000); 
         }
 
-        // 2. AHORA SÍ, BUSCAR AL USUARIO DENTRO DE TUS CLIENTES FILTRADOS
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
         await searchInput.click();
-        await page.evaluate(() => {
-            document.querySelector('#user_search').value = '';
-        });
-        
+        await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
         await searchInput.fill(username);
-        
-        // Espera inteligente a que la fila aparezca
-        try {
-            await page.waitForSelector(`#datatable-users tbody tr:has-text("${username}")`, { timeout: 8000 });
-        } catch (e) {
-            await page.waitForTimeout(4000); 
-        }
+        await page.waitForTimeout(3000); // Esperar que la tabla filtre en pantalla
 
-        // CAMBIO CLAVE: Buscamos la fila que tenga EXACTAMENTE el nombre de usuario, bloqueando los parecidos
-        const userLink = page.locator('#datatable-users tbody tr').filter({
-            has: page.locator('td:nth-child(2)'), // Apunta directo a la columna USERNAME
-            hasText: new RegExp(`^${username}$`, 'i') // El '^' y el '$' obligan a que el nombre sea idéntico
-        }).locator('a[href*="id="]').first();
+        // EXTRACCIÓN EN JAVASCRIPT NATIVO: Evalúa celda por celda de forma exacta
+        const userMatch = await page.evaluate((uname) => {
+            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            for (const fila of filas) {
+                const columnas = fila.querySelectorAll('td');
+                if (columnas.length < 2) continue;
+                
+                const textoUsuario = columnas[1]?.innerText.trim();
+                // Comparación idéntica absoluta (evita que iptvsebaa coincida con iptvsebastian)
+                if (textoUsuario && textoUsuario.toLowerCase() === uname.toLowerCase()) {
+                    const link = fila.querySelector('a[href*="id="]');
+                    return {
+                        href: link ? link.getAttribute('href') : null,
+                        usernameReal: textoUsuario
+                    };
+                }
+            }
+            return null;
+        }, username);
 
-        if (await userLink.count() === 0) {
+        if (!userMatch || !userMatch.href) {
             return res.status(404).json({ 
                 status: 'error', 
-                message: `El usuario '${username}' no fue encontrado tras aplicar filtros.` 
+                message: `El usuario '${username}' no fue encontrado de forma exacta en la tabla.` 
             });
         }
 
-        const href = await userLink.getAttribute('href'); 
-        const userId = href.split('id=')[1];
+        const userId = userMatch.href.split('id=')[1];
 
+        // Ejecutar extensión
         await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`);
         await page.waitForLoadState('networkidle');
-        
         await page.selectOption('#package', realPackageId);
         
         await page.click('a[href="#review-purchase"]');
@@ -190,19 +197,28 @@ app.post('/extend-user', async (req, res) => {
             console.log("Aviso: Espera de redirección al límite tras renovar...");
         }
 
-        // Volver a buscar el usuario en la tabla general para ver sus nuevas fechas actualizadas tras la renovación
+        // Rescatar las nuevas fechas de la tabla tras renovar
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
+        if (await resellerSelect.count() > 0) {
+            await resellerSelect.selectOption('Flashstorechile');
+            await page.waitForTimeout(1500);
+        }
         await page.fill('#user_search', username);
         await page.waitForTimeout(2000);
 
         const fechasActualizadas = await page.evaluate((uname) => {
-            const fila = Array.from(document.querySelectorAll('#datatable-users tbody tr')).find(tr => tr.innerText.includes(uname));
-            if (!fila) return { expiration: 'No encontrada', daysLeft: 'No encontrado' };
-            const columnas = fila.querySelectorAll('td');
-            return {
-                expiration: columnas[6]?.innerText.trim() || 'N/A',
-                daysLeft: columnas[7]?.innerText.trim() || 'N/A'
-            };
+            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            for (const fila of filas) {
+                const columnas = fila.querySelectorAll('td');
+                if (columnas.length < 8) continue;
+                if (columnas[1]?.innerText.trim().toLowerCase() === uname.toLowerCase()) {
+                    return {
+                        expiration: columnas[6]?.innerText.trim() || 'N/A',
+                        daysLeft: columnas[7]?.innerText.trim() || 'N/A'
+                    };
+                }
+            }
+            return { expiration: 'No encontrada', daysLeft: 'No encontrado' };
         }, username);
 
         res.json({ 
@@ -283,7 +299,7 @@ app.post('/vencimientos', async (req, res) => {
     }
 });
 
-// 4. RUTA PARA CONSULTAR SI UN USUARIO EXISTE Y SU ESTADO
+// 4. RUTA PARA CONSULTAR USUARIO (CORREGIDA CON EXTRACCIÓN ESTRICTA NATIVA)
 app.post('/check-user', async (req, res) => {
     const { username } = req.body;
 
@@ -298,33 +314,41 @@ app.post('/check-user', async (req, res) => {
         await loginToPanel(page);
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
+        const resellerSelect = page.locator('select[name*="reseller"], select[id*="reseller"]').first();
+        if (await resellerSelect.count() > 0) {
+            await resellerSelect.selectOption('Flashstorechile');
+            await page.waitForTimeout(2000); 
+        }
+
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
-        // Limpiar búsqueda vieja e ingresar el usuario a consultar
         await searchInput.click();
         await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
         await searchInput.fill(username);
-        await page.waitForTimeout(3000); // Esperar que filtre la tabla
+        await page.waitForTimeout(3000); 
 
-        // Buscar si el usuario aparece en la tabla
+        // Extracción estricta idéntica para evitar falsos positivos
         const usuarioEncontrado = await page.evaluate((uname) => {
-            const fila = Array.from(document.querySelectorAll('#datatable-users tbody tr'))
-                              .find(tr => tr.innerText.toLowerCase().includes(uname.toLowerCase()));
+            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
             
-            if (!fila || fila.innerText.includes('No matching records found')) {
-                return null; // No existe
+            for (const fila of filas) {
+                const columnas = fila.querySelectorAll('td');
+                if (columnas.length < 8) continue;
+                
+                const textoUsuario = columnas[1]?.innerText.trim();
+                if (textoUsuario && textoUsuario.toLowerCase() === uname.toLowerCase()) {
+                    return {
+                        exists: true,
+                        username: textoUsuario,
+                        reseller: columnas[3]?.innerText.trim(),
+                        status: columnas[4]?.innerText.trim(),     
+                        expiration: columnas[6]?.innerText.trim(), 
+                        daysLeft: columnas[7]?.innerText.trim()    
+                    };
+                }
             }
-
-            const columnas = fila.querySelectorAll('td');
-            return {
-                exists: true,
-                username: columnas[1]?.innerText.trim(),
-                reseller: columnas[3]?.innerText.trim(),
-                status: columnas[4]?.innerText.trim(),     // Ej: "Active" o "Disabled"
-                expiration: columnas[6]?.innerText.trim(), // Fecha de vencimiento
-                daysLeft: columnas[7]?.innerText.trim()    // Ej: "12 Days" o "-2 Days"
-            };
+            return null; 
         }, username);
 
         if (!usuarioEncontrado) {
