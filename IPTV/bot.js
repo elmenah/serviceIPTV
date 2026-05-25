@@ -289,7 +289,8 @@ app.post('/check-user', async (req, res) => {
         await searchInput.fill(username);
         await page.waitForTimeout(3000); // Esperar 3 segundos fijos a que el panel filtre en pantalla
 
-        // EXTRACCIÓN EN JAVASCRIPT NATIVO: Evalúa celda por celda de forma exacta
+       
+       // EXTRACCIÓN EN JAVASCRIPT NATIVO CORREGIDA (RECORRE TODAS LAS FILAS)
         const usuarioEncontrado = await page.evaluate((uname) => {
             const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
             
@@ -300,18 +301,20 @@ app.post('/check-user', async (req, res) => {
                 const textoUsuario = columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase();
                 const nombreBuscado = uname.replace(/\s+/g, '').toLowerCase();
                 
-                // Comparación idéntica absoluta (evita falsos positivos como iptvsebaa vs iptvsebastian)
+                // Si calza exacto, devolvemos el objeto e interrumpimos el bucle con éxito
                 if (textoUsuario === nombreBuscado) {
                     return {
                         exists: true,
                         username: columnas[1]?.innerText.trim(),
                         reseller: columnas[3]?.innerText.trim(),
-                        status: columnas[4]?.innerText.trim(),     // Ej: "Active" o "Disabled"
-                        expiration: columnas[6]?.innerText.trim(), // Fecha de vencimiento
-                        daysLeft: columnas[7]?.innerText.trim()    // Ej: "3 Days" o "-2 Days"
+                        status: columnas[4]?.innerText.trim(),     
+                        expiration: columnas[6]?.innerText.trim(), 
+                        daysLeft: columnas[7]?.innerText.trim()    
                     };
                 }
+                // Si NO calza, el bucle SIGUE a la próxima fila gracias al ciclo for...of
             }
+            // Solo si revisó absolutamente todas las filas y ninguna coincidió, devuelve null
             return null; 
         }, username);
 
