@@ -259,7 +259,7 @@ app.post('/vencimientos', async (req, res) => {
     }
 });
 
-// 4. RUTA PARA CONSULTAR USUARIOS (ESCRITURA IDÉNTICA A LA RENOVACIÓN)
+// 4. RUTA PARA CONSULTAR SI UN USUARIO EXISTE Y SU ESTADO (CORREGIDA)
 app.post('/check-user', async (req, res) => {
     const { username } = req.body;
 
@@ -274,55 +274,53 @@ app.post('/check-user', async (req, res) => {
         await loginToPanel(page);
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
+        // Vamos directo al buscador, igual que en la ruta de vencimientos
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
-        // Clonamos exactamente el flujo de tipeo de las otras rutas funcionales:
         await searchInput.click();
         await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
-        
-        // Escribe el nombre tal cual lo hace al renovar
         await searchInput.fill(username);
-        
-        // Esperamos los 3 segundos exactos para que el script del panel filtre las filas
-        await page.waitForTimeout(3000); 
+        await page.waitForTimeout(3000); // Esperamos 3 segundos a que filtre la tabla
 
-        // Capturamos lo que quedó visible en la tabla filtrada
-        const usuariosEncontrados = await page.evaluate(() => {
+        // Evaluamos todas las filas que aparezcan en pantalla
+        const usuarioEncontrado = await page.evaluate((uname) => {
             const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
-            const lista = [];
             
             for (const fila of filas) {
                 const columnas = fila.querySelectorAll('td');
-                // Ignorar filas vacías o el mensaje "No matching records found"
-                if (columnas.length < 8 || columnas[0]?.innerText.includes('No data') || fila.innerText.includes('No matching records')) continue;
+                if (columnas.length < 8) continue;
                 
-                lista.push({
-                    username: columnas[1]?.innerText.trim(),
-                    reseller: columnas[3]?.innerText.trim(),
-                    status: columnas[4]?.innerText.trim(),     
-                    expiration: columnas[6]?.innerText.trim(), 
-                    daysLeft: columnas[7]?.innerText.trim()    
-                });
+                const textoUsuario = columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase();
+                const nombreBuscado = uname.replace(/\s+/g, '').toLowerCase();
+                
+                // Comparación exacta fila por fila
+                if (textoUsuario === nombreBuscado) {
+                    return {
+                        exists: true,
+                        username: columnas[1]?.innerText.trim(),
+                        reseller: columnas[3]?.innerText.trim(),
+                        status: columnas[4]?.innerText.trim(),     
+                        expiration: columnas[6]?.innerText.trim(), 
+                        daysLeft: columnas[7]?.innerText.trim()    
+                    };
+                }
             }
-            return lista;
-        });
+            return null; 
+        }, username);
 
-        if (usuariosEncontrados.length === 0) {
+        if (!usuarioEncontrado) {
             return res.json({ 
                 status: 'not_found', 
                 exists: false,
-                message: `El usuario '${username}' no fue encontrado.`,
-                data: []
+                message: `El usuario '${username}' no fue encontrado.` 
             });
         }
 
-        // Retorna la lista con los usuarios que calzaron en el filtro dinámico
         res.json({
             status: 'success',
             exists: true,
-            totalFound: usuariosEncontrados.length,
-            data: usuariosEncontrados
+            data: usuarioEncontrado
         });
 
     } catch (error) {
@@ -331,4 +329,5 @@ app.post('/check-user', async (req, res) => {
         await browser.close();
     }
 });
+
 app.listen(3000, '0.0.0.0', () => console.log('API de Playwright lista en el puerto 3000'));
