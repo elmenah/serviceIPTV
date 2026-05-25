@@ -259,7 +259,7 @@ app.post('/vencimientos', async (req, res) => {
     }
 });
 
-// 4. RUTA PARA CONSULTAR SI UN USUARIO EXISTE Y SU ESTADO (CORREGIDA)
+// 4. RUTA PARA CONSULTAR USUARIOS (TRAE TODOS LOS QUE COINCIDAN EN LA TABLA)
 app.post('/check-user', async (req, res) => {
     const { username } = req.body;
 
@@ -274,53 +274,53 @@ app.post('/check-user', async (req, res) => {
         await loginToPanel(page);
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
-        // Vamos directo al buscador, igual que en la ruta de vencimientos
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
         await searchInput.click();
         await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
         await searchInput.fill(username);
-        await page.waitForTimeout(3000); // Esperamos 3 segundos a que filtre la tabla
+        
+        // Esperamos 3 segundos completos para asegurarnos que el panel cargó TODAS las filas
+        await page.waitForTimeout(3000); 
 
-        // Evaluamos todas las filas que aparezcan en pantalla
-        const usuarioEncontrado = await page.evaluate((uname) => {
+        // Recopilamos todos los usuarios que aparezcan en la tabla
+        const usuariosEncontrados = await page.evaluate(() => {
             const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            const lista = [];
             
             for (const fila of filas) {
                 const columnas = fila.querySelectorAll('td');
-                if (columnas.length < 8) continue;
+                // Si la tabla está vacía o dice "No data available", nos saltamos la fila
+                if (columnas.length < 8 || columnas[0]?.innerText.includes('No data')) continue;
                 
-                const textoUsuario = columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase();
-                const nombreBuscado = uname.replace(/\s+/g, '').toLowerCase();
-                
-                // Comparación exacta fila por fila
-                if (textoUsuario === nombreBuscado) {
-                    return {
-                        exists: true,
-                        username: columnas[1]?.innerText.trim(),
-                        reseller: columnas[3]?.innerText.trim(),
-                        status: columnas[4]?.innerText.trim(),     
-                        expiration: columnas[6]?.innerText.trim(), 
-                        daysLeft: columnas[7]?.innerText.trim()    
-                    };
-                }
+                lista.push({
+                    username: columnas[1]?.innerText.trim(),
+                    reseller: columnas[3]?.innerText.trim(),
+                    status: columnas[4]?.innerText.trim(),     
+                    expiration: columnas[6]?.innerText.trim(), 
+                    daysLeft: columnas[7]?.innerText.trim()    
+                });
             }
-            return null; 
-        }, username);
+            return lista;
+        });
 
-        if (!usuarioEncontrado) {
+        // Si la lista está vacía, es porque realmente no había nada
+        if (usuariosEncontrados.length === 0) {
             return res.json({ 
                 status: 'not_found', 
                 exists: false,
-                message: `El usuario '${username}' no fue encontrado.` 
+                message: `No se encontró ningún usuario con el término '${username}'.`,
+                data: []
             });
         }
 
+        // Devolvemos la lista completa de lo que pilló el bot
         res.json({
             status: 'success',
             exists: true,
-            data: usuarioEncontrado
+            totalFound: usuariosEncontrados.length,
+            data: usuariosEncontrados // Aquí viajan todos (sean 1, 2 o más)
         });
 
     } catch (error) {
