@@ -259,4 +259,82 @@ app.post('/vencimientos', async (req, res) => {
     }
 });
 
+// 4. RUTA PARA CONSULTAR SI UN USUARIO EXISTE Y SU ESTADO (ANTI-CONFUSIONES)
+app.post('/check-user', async (req, res) => {
+    const { username } = req.body;
+
+    const browser = await chromium.launch({ 
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+    });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+
+    try {
+        await loginToPanel(page);
+        await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
+        
+        // Forzar el filtro de tu distribuidor para acortar la tabla a tus clientes
+        const resellerSelect = page.locator('select[name*="reseller"], select[id*="reseller"]').first();
+        if (await resellerSelect.count() > 0) {
+            await resellerSelect.selectOption('Flashstorechile');
+            await page.waitForTimeout(2000); 
+        }
+
+        const searchInput = page.locator('#user_search');
+        await searchInput.waitFor({ state: 'visible', timeout: 10000 });
+        
+        await searchInput.click();
+        await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
+        await searchInput.fill(username);
+        await page.waitForTimeout(3000); // Esperar 3 segundos fijos a que el panel filtre en pantalla
+
+        // EXTRACCIÓN EN JAVASCRIPT NATIVO: Evalúa celda por celda de forma exacta
+        const usuarioEncontrado = await page.evaluate((uname) => {
+            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            
+            for (const fila of filas) {
+                const columnas = fila.querySelectorAll('td');
+                if (columnas.length < 8) continue;
+                
+                const textoUsuario = columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase();
+                const nombreBuscado = uname.replace(/\s+/g, '').toLowerCase();
+                
+                // Comparación idéntica absoluta (evita falsos positivos como iptvsebaa vs iptvsebastian)
+                if (textoUsuario === nombreBuscado) {
+                    return {
+                        exists: true,
+                        username: columnas[1]?.innerText.trim(),
+                        reseller: columnas[3]?.innerText.trim(),
+                        status: columnas[4]?.innerText.trim(),     // Ej: "Active" o "Disabled"
+                        expiration: columnas[6]?.innerText.trim(), // Fecha de vencimiento
+                        daysLeft: columnas[7]?.innerText.trim()    // Ej: "3 Days" o "-2 Days"
+                    };
+                }
+            }
+            return null; 
+        }, username);
+
+        if (!usuarioEncontrado) {
+            return res.json({ 
+                status: 'not_found', 
+                exists: false,
+                message: `El usuario '${username}' no existe en el panel.` 
+            });
+        }
+
+        // Si lo encuentra, devuelve toda la info limpia
+        res.json({
+            status: 'success',
+            exists: true,
+            data: usuarioEncontrado
+        });
+
+    } catch (error) {
+        res.status(500).json({ status: 'error', message: error.message });
+    } finally {
+        await browser.close();
+    }
+});
+
 app.listen(3000, '0.0.0.0', () => console.log('API de Playwright lista en el puerto 3000'));
