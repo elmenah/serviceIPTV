@@ -259,7 +259,7 @@ app.post('/vencimientos', async (req, res) => {
     }
 });
 
-// 4. RUTA PARA CONSULTAR SI UN USUARIO EXISTE Y SU ESTADO (ANTI-CONFUSIONES)
+// 4. RUTA PARA CONSULTAR SI UN USUARIO EXISTE Y SU ESTADO (CORREGIDA)
 app.post('/check-user', async (req, res) => {
     const { username } = req.body;
 
@@ -274,23 +274,16 @@ app.post('/check-user', async (req, res) => {
         await loginToPanel(page);
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         
-        // Forzar el filtro de tu distribuidor para acortar la tabla a tus clientes
-        const resellerSelect = page.locator('select[name*="reseller"], select[id*="reseller"]').first();
-        if (await resellerSelect.count() > 0) {
-            await resellerSelect.selectOption('Flashstorechile');
-            await page.waitForTimeout(2000); 
-        }
-
+        // Vamos directo al buscador, igual que en la ruta de vencimientos
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
         await searchInput.click();
         await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
         await searchInput.fill(username);
-        await page.waitForTimeout(3000); // Esperar 3 segundos fijos a que el panel filtre en pantalla
+        await page.waitForTimeout(3000); // Esperamos 3 segundos a que filtre la tabla
 
-       
-       // EXTRACCIÓN EN JAVASCRIPT NATIVO CORREGIDA (RECORRE TODAS LAS FILAS)
+        // Evaluamos todas las filas que aparezcan en pantalla
         const usuarioEncontrado = await page.evaluate((uname) => {
             const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
             
@@ -301,7 +294,7 @@ app.post('/check-user', async (req, res) => {
                 const textoUsuario = columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase();
                 const nombreBuscado = uname.replace(/\s+/g, '').toLowerCase();
                 
-                // Si calza exacto, devolvemos el objeto e interrumpimos el bucle con éxito
+                // Comparación exacta fila por fila
                 if (textoUsuario === nombreBuscado) {
                     return {
                         exists: true,
@@ -312,9 +305,7 @@ app.post('/check-user', async (req, res) => {
                         daysLeft: columnas[7]?.innerText.trim()    
                     };
                 }
-                // Si NO calza, el bucle SIGUE a la próxima fila gracias al ciclo for...of
             }
-            // Solo si revisó absolutamente todas las filas y ninguna coincidió, devuelve null
             return null; 
         }, username);
 
@@ -322,11 +313,10 @@ app.post('/check-user', async (req, res) => {
             return res.json({ 
                 status: 'not_found', 
                 exists: false,
-                message: `El usuario '${username}' no existe en el panel.` 
+                message: `El usuario '${username}' no fue encontrado.` 
             });
         }
 
-        // Si lo encuentra, devuelve toda la info limpia
         res.json({
             status: 'success',
             exists: true,
