@@ -259,7 +259,7 @@ app.post('/vencimientos', async (req, res) => {
     }
 });
 
-// 4. RUTA PARA CONSULTAR USUARIOS (TRAE TODOS LOS QUE COINCIDAN EN LA TABLA)
+// 4. RUTA PARA CONSULTAR USUARIOS (ESCRITURA IDÉNTICA A LA RENOVACIÓN)
 app.post('/check-user', async (req, res) => {
     const { username } = req.body;
 
@@ -277,22 +277,25 @@ app.post('/check-user', async (req, res) => {
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
+        // Clonamos exactamente el flujo de tipeo de las otras rutas funcionales:
         await searchInput.click();
         await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
+        
+        // Escribe el nombre tal cual lo hace al renovar
         await searchInput.fill(username);
         
-        // Esperamos 3 segundos completos para asegurarnos que el panel cargó TODAS las filas
+        // Esperamos los 3 segundos exactos para que el script del panel filtre las filas
         await page.waitForTimeout(3000); 
 
-        // Recopilamos todos los usuarios que aparezcan en la tabla
+        // Capturamos lo que quedó visible en la tabla filtrada
         const usuariosEncontrados = await page.evaluate(() => {
             const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
             const lista = [];
             
             for (const fila of filas) {
                 const columnas = fila.querySelectorAll('td');
-                // Si la tabla está vacía o dice "No data available", nos saltamos la fila
-                if (columnas.length < 8 || columnas[0]?.innerText.includes('No data')) continue;
+                // Ignorar filas vacías o el mensaje "No matching records found"
+                if (columnas.length < 8 || columnas[0]?.innerText.includes('No data') || fila.innerText.includes('No matching records')) continue;
                 
                 lista.push({
                     username: columnas[1]?.innerText.trim(),
@@ -305,22 +308,21 @@ app.post('/check-user', async (req, res) => {
             return lista;
         });
 
-        // Si la lista está vacía, es porque realmente no había nada
         if (usuariosEncontrados.length === 0) {
             return res.json({ 
                 status: 'not_found', 
                 exists: false,
-                message: `No se encontró ningún usuario con el término '${username}'.`,
+                message: `El usuario '${username}' no fue encontrado.`,
                 data: []
             });
         }
 
-        // Devolvemos la lista completa de lo que pilló el bot
+        // Retorna la lista con los usuarios que calzaron en el filtro dinámico
         res.json({
             status: 'success',
             exists: true,
             totalFound: usuariosEncontrados.length,
-            data: usuariosEncontrados // Aquí viajan todos (sean 1, 2 o más)
+            data: usuariosEncontrados
         });
 
     } catch (error) {
@@ -329,5 +331,4 @@ app.post('/check-user', async (req, res) => {
         await browser.close();
     }
 });
-
 app.listen(3000, '0.0.0.0', () => console.log('API de Playwright lista en el puerto 3000'));
