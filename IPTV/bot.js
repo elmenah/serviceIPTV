@@ -116,7 +116,7 @@ app.post('/create-user', async (req, res) => {
     }
 });
 
-// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO (AHORA ENTREGA EXPIRACIÓN Y DÍAS)
+// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO (EXTRACCIÓN DIRECTA POR COLUMNA ID)
 app.post('/extend-user', async (req, res) => {
     const { username, packageId } = req.body;
     const realPackageId = mapeoPlanes[packageId] || packageId;
@@ -136,27 +136,43 @@ app.post('/extend-user', async (req, res) => {
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
         await searchInput.click();
-        await page.evaluate(() => {
-            document.querySelector('#user_search').value = '';
-        });
+        await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
         await searchInput.fill(username);
-        await page.waitForTimeout(3000); 
+        await page.waitForTimeout(3000); // Esperar que filtre la tabla
 
-        const userLink = page.locator(`a[href*="id="]:has-text("${username}")`).first();
-        if (await userLink.count() === 0) {
-            return res.status(404).json({ status: 'error', message: `El usuario '${username}' no fue encontrado.` });
+        // Extraer la ID directamente desde la columna 0 de la fila
+        const userId = await page.evaluate((uname) => {
+            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            for (const fila of filas) {
+                const columnas = fila.querySelectorAll('td');
+                if (columnas.length < 8) continue;
+                
+                const textoUsuario = columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase();
+                const nombreBuscado = uname.replace(/\s+/g, '').toLowerCase();
+                
+                if (textoUsuario === nombreBuscado) {
+                    // Extrae el número de ID directamente desde la primera celda
+                    return columnas[0]?.innerText.trim();
+                }
+            }
+            return null;
+        }, username);
+
+        if (!userId) {
+            return res.status(404).json({ 
+                status: 'error', 
+                message: `El usuario '${username}' no fue encontrado en la tabla.` 
+            });
         }
 
-        const href = await userLink.getAttribute('href'); 
-        const userId = href.split('id=')[1];
+        // Navegar a la página de extensión con la ID obtenida de la celda
+        await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`, { waitUntil: 'load' });
+        await page.waitForTimeout(1500);
 
-        await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`);
-        await page.waitForLoadState('networkidle');
-        
         await page.selectOption('#package', realPackageId);
         
         await page.click('a[href="#review-purchase"]');
-        await page.waitForTimeout(3000); 
+        await page.waitForTimeout(2000); 
 
         await page.click('.purchase');
         
@@ -166,25 +182,31 @@ app.post('/extend-user', async (req, res) => {
             console.log("Aviso: Espera de redirección al límite tras renovar...");
         }
 
-        // Volver a buscar el usuario en la tabla general para ver sus nuevas fechas actualizadas tras la renovación
+        // Rescatar las nuevas fechas de la tabla tras renovar
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         await page.fill('#user_search', username);
         await page.waitForTimeout(2000);
 
         const fechasActualizadas = await page.evaluate((uname) => {
-            const fila = Array.from(document.querySelectorAll('#datatable-users tbody tr')).find(tr => tr.innerText.includes(uname));
-            if (!fila) return { expiration: 'No encontrada', daysLeft: 'No encontrado' };
-            const columnas = fila.querySelectorAll('td');
-            return {
-                expiration: columnas[6]?.innerText.trim() || 'N/A',
-                daysLeft: columnas[7]?.innerText.trim() || 'N/A'
-            };
+            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            for (const fila of filas) {
+                const columnas = fila.querySelectorAll('td');
+                if (columnas.length < 8) continue;
+                if (columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase() === uname.replace(/\s+/g, '').toLowerCase()) {
+                    return {
+                        expiration: columnas[6]?.innerText.trim() || 'N/A',
+                        daysLeft: columnas[7]?.innerText.trim() || 'N/A'
+                    };
+                }
+            }
+            return { expiration: 'No encontrada', daysLeft: 'No encontrado' };
         }, username);
 
         res.json({ 
             status: 'success', 
             message: `¡Usuario ${username} renovado exitosamente con el paquete ${packageId}!`,
             data: {
+                id: userId,
                 username: username,
                 expiration: fechasActualizadas.expiration,
                 daysLeft: fechasActualizadas.daysLeft
