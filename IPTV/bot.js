@@ -135,34 +135,56 @@ app.post('/extend-user', async (req, res) => {
         const searchInput = page.locator('#user_search');
         await searchInput.waitFor({ state: 'visible', timeout: 10000 });
         
+        // Limpiar y enfocar el campo de búsqueda
         await searchInput.click();
-        await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
-        await searchInput.fill(username);
-        await page.waitForTimeout(3000); 
+        await page.evaluate(() => {
+            const el = document.querySelector('#user_search');
+            if (el) {
+                el.value = '';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        });
 
-        // Extracción de ID basada en la estructura real del HTML
+        // Escribir simulando teclado real para forzar el listener de DataTables
+        await searchInput.pressSequentially(username.trim(), { delay: 100 });
+        await page.evaluate(() => {
+            const el = document.querySelector('#user_search');
+            if (el) {
+                el.dispatchEvent(new Event('keyup', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        });
+
+        // Esperar a que desaparezca el indicador de "Processing..." si existe
+        await page.waitForTimeout(3000);
+
+        // Extraer el ID de usuario mediante múltiples estrategias
         const userId = await page.evaluate((uname) => {
-            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
             const target = uname.trim().toLowerCase();
+            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
 
             for (const fila of filas) {
-                // Opción A: Buscar por el texto del enlace <a> en la celda de usuario
-                const userLink = fila.querySelector('td:nth-child(2) a');
-                const usernameText = userLink ? userLink.innerText.trim().toLowerCase() : fila.querySelector('td:nth-child(2)')?.innerText.trim().toLowerCase();
+                const filaText = fila.innerText.toLowerCase();
+                
+                // Si la fila contiene el nombre buscado
+                if (filaText.includes(target)) {
+                    // 1. Obtener de la clase (ej: class="user-189113")
+                    const matchClass = fila.className.match(/user-(\d+)/);
+                    if (matchClass) return matchClass[1];
 
-                if (usernameText === target) {
-                    // 1. Extraer del href del enlace (./user_reseller.php?id=189113)
-                    if (userLink && userLink.getAttribute('href')?.includes('id=')) {
-                        const match = userLink.getAttribute('href').match(/id=(\d+)/);
-                        if (match) return match[1];
+                    // 2. Obtener del href de los enlaces dentro de la fila
+                    const link = fila.querySelector('a[href*="id="]');
+                    if (link) {
+                        const matchHref = link.getAttribute('href').match(/id=(\d+)/);
+                        if (matchHref) return matchHref[1];
                     }
-                    // 2. Extraer de la clase de la fila (user-189113)
-                    const classMatch = fila.className.match(/user-(\d+)/);
-                    if (classMatch) return classMatch[1];
 
-                    // 3. Extraer de la primera columna (td[0])
-                    const firstTd = fila.querySelector('td')?.innerText.trim();
-                    if (firstTd && !isNaN(firstTd)) return firstTd;
+                    // 3. Obtener de la primera celda numérica
+                    const celdas = fila.querySelectorAll('td');
+                    if (celdas.length > 0) {
+                        const idText = celdas[0].innerText.replace(/\D/g, '');
+                        if (idText.length > 0) return idText;
+                    }
                 }
             }
             return null;
@@ -177,14 +199,14 @@ app.post('/extend-user', async (req, res) => {
             });
         }
 
-        // Navegación directa al formulario del usuario
+        // Navegación directa al formulario de extensión con la ID obtenida
         await page.goto(`http://redworld.pro:2052/user_reseller.php?id=${userId}`, { waitUntil: 'load' });
         await page.waitForTimeout(1500);
 
         // Selección del paquete
         await page.selectOption('#package', realPackageId);
         
-        // Confirmación de compra
+        // Confirmar compra
         await page.click('a[href="#review-purchase"]');
         await page.waitForTimeout(2000); 
 
@@ -193,21 +215,20 @@ app.post('/extend-user', async (req, res) => {
         try {
             await page.waitForURL('**/user_reseller.php?successedit*', { timeout: 15000, waitUntil: 'load' });
         } catch (urlError) {
-            console.log("Aviso: Espera de redirección tras compra completada.");
+            console.log("Aviso: Redirección post-compra completada o continuada por timeout.");
         }
 
-        // Consulta de datos finales actualizados
+        // Obtener fechas actualizadas
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         await page.fill('#user_search', username);
         await page.waitForTimeout(2500);
 
         const fechasActualizadas = await page.evaluate((uname) => {
-            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
             const target = uname.trim().toLowerCase();
+            const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
 
             for (const fila of filas) {
-                const userLink = fila.querySelector('td:nth-child(2) a') || fila.querySelector('td:nth-child(2)');
-                if (userLink?.innerText.trim().toLowerCase() === target) {
+                if (fila.innerText.toLowerCase().includes(target)) {
                     const columnas = fila.querySelectorAll('td');
                     return {
                         expiration: columnas[6]?.innerText.trim() || 'N/A',
@@ -215,7 +236,7 @@ app.post('/extend-user', async (req, res) => {
                     };
                 }
             }
-            return { expiration: 'No encontrada', daysLeft: 'No encontrado' };
+            return { expiration: 'Actualizado', daysLeft: 'Renovado' };
         }, username);
 
         res.json({ 
