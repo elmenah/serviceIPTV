@@ -116,7 +116,7 @@ app.post('/create-user', async (req, res) => {
     }
 });
 
-// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO (EXTRACCIÓN DIRECTA POR COLUMNA ID)
+// 2. RUTA PARA RENOVAR/EXTENDER UN USUARIO
 app.post('/extend-user', async (req, res) => {
     const { username, packageId } = req.body;
     const realPackageId = mapeoPlanes[packageId] || packageId;
@@ -138,39 +138,53 @@ app.post('/extend-user', async (req, res) => {
         await searchInput.click();
         await page.evaluate(() => { document.querySelector('#user_search').value = ''; });
         await searchInput.fill(username);
-        await page.waitForTimeout(3000); // Esperar que filtre la tabla
+        await page.waitForTimeout(3000); 
 
-        // Extraer la ID directamente desde la columna 0 de la fila
+        // Extracción de ID basada en la estructura real del HTML
         const userId = await page.evaluate((uname) => {
             const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            const target = uname.trim().toLowerCase();
+
             for (const fila of filas) {
-                const columnas = fila.querySelectorAll('td');
-                if (columnas.length < 8) continue;
-                
-                const textoUsuario = columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase();
-                const nombreBuscado = uname.replace(/\s+/g, '').toLowerCase();
-                
-                if (textoUsuario === nombreBuscado) {
-                    // Extrae el número de ID directamente desde la primera celda
-                    return columnas[0]?.innerText.trim();
+                // Opción A: Buscar por el texto del enlace <a> en la celda de usuario
+                const userLink = fila.querySelector('td:nth-child(2) a');
+                const usernameText = userLink ? userLink.innerText.trim().toLowerCase() : fila.querySelector('td:nth-child(2)')?.innerText.trim().toLowerCase();
+
+                if (usernameText === target) {
+                    // 1. Extraer del href del enlace (./user_reseller.php?id=189113)
+                    if (userLink && userLink.getAttribute('href')?.includes('id=')) {
+                        const match = userLink.getAttribute('href').match(/id=(\d+)/);
+                        if (match) return match[1];
+                    }
+                    // 2. Extraer de la clase de la fila (user-189113)
+                    const classMatch = fila.className.match(/user-(\d+)/);
+                    if (classMatch) return classMatch[1];
+
+                    // 3. Extraer de la primera columna (td[0])
+                    const firstTd = fila.querySelector('td')?.innerText.trim();
+                    if (firstTd && !isNaN(firstTd)) return firstTd;
                 }
             }
             return null;
         }, username);
 
         if (!userId) {
+            const screenshotBuffer = await page.screenshot({ fullPage: false });
             return res.status(404).json({ 
                 status: 'error', 
-                message: `El usuario '${username}' no fue encontrado en la tabla.` 
+                message: `El usuario '${username}' no fue encontrado en la tabla.`,
+                screenshot: screenshotBuffer.toString('base64')
             });
         }
 
-        // Navegar a la página de extensión con la ID obtenida de la celda
-        await page.goto(`http://redworld.pro:2052/user_reseller.php?action=extend&id=${userId}`, { waitUntil: 'load' });
+        // Navegación directa al formulario del usuario
+        await page.goto(`http://redworld.pro:2052/user_reseller.php?id=${userId}`, { waitUntil: 'load' });
         await page.waitForTimeout(1500);
 
+        // Selección del paquete
         await page.selectOption('#package', realPackageId);
         
+        // Confirmación de compra
         await page.click('a[href="#review-purchase"]');
         await page.waitForTimeout(2000); 
 
@@ -179,20 +193,22 @@ app.post('/extend-user', async (req, res) => {
         try {
             await page.waitForURL('**/user_reseller.php?successedit*', { timeout: 15000, waitUntil: 'load' });
         } catch (urlError) {
-            console.log("Aviso: Espera de redirección al límite tras renovar...");
+            console.log("Aviso: Espera de redirección tras compra completada.");
         }
 
-        // Rescatar las nuevas fechas de la tabla tras renovar
+        // Consulta de datos finales actualizados
         await page.goto('http://redworld.pro:2052/users.php', { waitUntil: 'load' });
         await page.fill('#user_search', username);
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(2500);
 
         const fechasActualizadas = await page.evaluate((uname) => {
             const filas = Array.from(document.querySelectorAll('#datatable-users tbody tr'));
+            const target = uname.trim().toLowerCase();
+
             for (const fila of filas) {
-                const columnas = fila.querySelectorAll('td');
-                if (columnas.length < 8) continue;
-                if (columnas[1]?.innerText.replace(/\s+/g, '').toLowerCase() === uname.replace(/\s+/g, '').toLowerCase()) {
+                const userLink = fila.querySelector('td:nth-child(2) a') || fila.querySelector('td:nth-child(2)');
+                if (userLink?.innerText.trim().toLowerCase() === target) {
+                    const columnas = fila.querySelectorAll('td');
                     return {
                         expiration: columnas[6]?.innerText.trim() || 'N/A',
                         daysLeft: columnas[7]?.innerText.trim() || 'N/A'
